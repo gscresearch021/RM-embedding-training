@@ -1,7 +1,8 @@
 use embassy_stm32::{
-    Peripherals, bind_interrupts, peripherals,
+    Peripherals, bind_interrupts,
     can::Can,
     gpio::{Flex, Level, Output, Speed},
+    peripherals,
     usart::{self, BufferedUart},
 };
 use static_cell::StaticCell;
