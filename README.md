@@ -1,170 +1,126 @@
-# HerKules L4 作业 · DM-MC02 USB 调试器
+# DM-MC02 USB 调试器与 CAN 桥接
 
-## MCU 是什么，程序怎么装进去
+基于 STM32H723VG，提供 USB↔CAN 持续双向桥接、UART8 串口转发、GPIO SWD DPIDR 读取和 CMSIS-DAP 演示接口。CAN 使用标准 11 位数据帧、0–8 字节、1 Mbit/s。
 
-**MCU（Microcontroller Unit，微控制器）**把 CPU、程序存储器 Flash、运行时内存 SRAM 和 GPIO、UART、USB 等外设集成在一颗芯片里。**STM32** 是 STMicroelectronics 的微控制器系列，**STM32H723VG** 是 DM-MC02 板上使用的具体芯片。烧录是把编译后的固件写入 Flash。板子正常复位后，MCU 从 Flash 启动并运行这份固件。
+固件已完成目标编译和链接；硬件通信尚未上板验证。CMSIS-DAP 接口只支持设备发现，不能代替外置探针烧录或执行完整调试。
 
-USB-C 提供连接，板子当前运行的程序决定电脑能通过 USB 做什么。本作业固件正常启动时，USB 提供调试探针和串口功能。要通过 USB 给这颗 STM32 本身烧录，可以先让它启动 ST 预装在系统存储器里的 **Bootloader（引导程序）**。进入 **USB DFU（Device Firmware Upgrade）** 模式后，电脑可以用支持 DFU 的工具将固件写入 Flash。STM32H723 支持这条路径，前提是板子接出了对应的 USB 信号并进入系统引导模式。[ST AN2606，STM32H72xxx/73xxx](https://www.st.com/resource/en/application_note/an2606-stm32-microcontroller-system-memory-boot-mode-stmicroelectronics.pdf)
+## 文件
 
-本作业首次烧录使用**外置调试探针**。电脑上的 `probe-rs` 通过外置探针和板上的 SWD 口写入 DM-MC02 的 Flash。烧好以后，DM-MC02 就能通过自己的 GPIO 和 SWD 读取目标芯片的调试端口 ID。
+| 文件 | 用途 |
+|---|---|
+| `src/` | 固件源码；`main.rs` 启动 USB、桥接、UART 与 DAP |
+| `Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml` | 构建配置与固定依赖版本 |
+| `.cargo/config.toml`、`memory.x` | STM32 编译目标、烧录命令和内存布局 |
+| `host_bridge.py` | 持续 CAN 收发工具 |
+| `host.py` | 基础控制、SWD、CAN 轮询和 UART 回环入口 |
+| `requirements-host.txt` | Python 运行依赖 |
 
-## 我们要做什么
+## 编译与烧录
 
-假设 STM32 程序运行到一半，某个变量突然变成了 0。你可以用电脑上的**调试软件**在那行代码设断点，让目标芯片执行到那里时暂停，再检查变量、寄存器或内存。probe-rs 和 OpenOCD 都可以通过调试探针访问目标芯片。
+电脑需要 Rust/rustup、Python 3.10 或以上；Windows 还需 MSVC C++ 生成工具和 Windows SDK。Rust 工具链固定为 1.99.1，目标为 `thumbv7em-none-eabihf`，由工具链文件指定。
 
-完整的 **USB 调试探针**位于电脑和目标芯片之间。电脑把调试命令通过 USB 发给探针。探针用两个 GPIO 产生 SWD 信号，把请求送到目标芯片，再把结果传回电脑。
+在仓库根目录执行：
 
-```text
-电脑（probe-rs / OpenOCD）
-        ↕ USB 上的 CMSIS-DAP v2
-USB 调试探针
-        ↕ 两根 SWD 信号线
-目标 STM32（芯片内置的调试端口）
+```powershell
+cargo build --locked
 ```
 
-| 名称 | 在这条路径中的作用 |
-| --- | --- |
-| **CMSIS-DAP v2** | 电脑和探针之间的 USB 命令格式，例如请求探针读取一个调试寄存器。 |
-| **SWD（Serial Wire Debug）** | 探针和目标芯片之间的通信接口。探针用 `SWCLK` 提供时钟，双方轮流驱动 `SWDIO` 来发送数据。 |
-| **DAP（Debug Access Port）** | 目标芯片内置的调试硬件。它接收 SWD 请求，并提供访问芯片调试功能的入口。 |
+生成的 ELF 为 `target/thumbv7em-none-eabihf/debug/dm-mc02-cmsis-dap`。
 
-作业用 **DM-MC02 演示这条路径的两个部分**。先用 `probe-rs list` 找到 CMSIS-DAP v2 演示接口。这个接口只提供设备发现所需的信息。再通过控制串口发 `SWD ID`，让 DM-MC02 实际产生 SWD 信号并读取目标的 **DPIDR**（Debug Port Identification Register，调试端口识别寄存器）。可把两个 GPIO 回接到同一块板的 SWD 口完成这项测试，CPU 会继续运行 USB 固件。
+首次烧录使用外置 SWD 探针，板卡另行正确供电；移除软件 SWD 回接跳线后，外置探针接 P1：SWCLK→3、SWDIO→4、GND→2。P1-1 的 3.3 V 根据探针的 VTref/供电定义连接，不并接未知电源输出。
 
-同一根 USB-C 数据线也提供两个串口。UART 串口转发原始字节，CAN/控制串口接收 `PING`、`SWD ID` 和 CAN 收发命令。
-
-## 准备工作
-
-### 1. 安装工具
-
-先完成 [Lecture 0 环境配置](https://training.herkules.dev/learn/lecture-0)。之前装好的 Git、Rust 和系统编译工具可以继续使用，这次不需要 ROS 2。建议使用 VS Code，并安装 `rust-lang.rust-analyzer` 扩展。
-
-打开终端，先检查：
-
-```sh
-git --version
-rustup --version
-cargo --version
-```
-
-然后额外安装 **probe-rs**，用于通过调试探针烧录固件：
-
-```sh
+```powershell
 cargo install probe-rs-tools --locked
-probe-rs --version
-```
-
-安装包叫 `probe-rs-tools`，运行的命令叫 `probe-rs`。安装完成后如果找不到命令，先重新打开终端。Linux 需要按 probe-rs 说明安装 udev 规则才能不用 `sudo` 访问探针；Windows 连接探针若遇到驱动问题，按 [probe-rs 官方说明](https://probe.rs/docs/getting-started/installation/) 和助教提供的探针型号处理。
-
-主机测试脚本还需要 Python 3 和 `pyserial`。建议在工程目录建一个虚拟环境（`.venv` 已在 `.gitignore` 中）：
-
-```sh
-python3 -m venv .venv
-source .venv/bin/activate
-python3 -m pip install pyserial
-```
-
-Windows PowerShell 中激活命令为 `.venv\Scripts\Activate.ps1`。之后每次打开新终端运行 `host.py` 前都要先激活。
-
-### 2. 用模板创建自己的仓库
-
-1. 打开 [作业模板](https://github.com/HKUAstar/embedded-training-template)。
-2. 点击 **Use this template → Create a new repository**，在自己的账号下创建作业仓库。
-3. 进入新仓库，点击 **Code**，复制自己的仓库地址。
-4. clone 自己的仓库，再用 VS Code 打开。例如，若新仓库叫 `embedded-training`：
-
-```sh
-git clone https://github.com/YOUR_USERNAME/embedded-training.git
-cd embedded-training
-code .
-```
-
-将 `YOUR_USERNAME` 和仓库名换成自己的。不要直接 clone 教师模板后向原仓库提交。开发时定期 commit、push。
-
-### 3. 第一次编译
-
-在工程根目录执行：
-
-```sh
-cargo build --locked
-```
-
-不需要手动 `rustup target add`。rustup 会按 `rust-toolchain.toml` 获取固定工具链和 `thumbv7em-none-eabihf`（Cortex-M7）目标，首次需要联网。若固定版本无法下载，保留报错交给助教核对，不要自行删除版本配置。`--locked` 表示严格使用 `Cargo.lock` 中的依赖版本。
-
-模板在补全 `src/wiring.rs` 前就能编译。编译产物是 `target/thumbv7em-none-eabihf/debug/dm-mc02-cmsis-dap`，这是不带扩展名的 ELF 固件文件。
-
-### 4. 烧录是怎么接起来的
-
-`cargo run` 不会在电脑上运行程序。`.cargo/config.toml` 把 runner 设为：
-
-```text
-probe-rs run --chip STM32H723VGTx --protocol swd ...
-```
-
-所以 `cargo run --locked` 会先编译，再调用 probe-rs，通过外置探针把 ELF 写入 STM32H723VG 的 Flash，复位后让程序运行，并保持一个日志会话。本固件没有输出 RTT 日志，烧录完成后终端停住不输出是正常的，按 Ctrl+C 退出即可，板子上的程序会继续运行。退出后才会释放探针，其他工具才能使用它。
-
-接线：外置探针的 SWDIO、SWCLK、GND 接 DM-MC02 的 P1 SWD 口（P1.3 是 SWCLK，P1.4 是 SWDIO），按实物核对接插件方向。板子需要单独供电，例如通过 USB-C 连接电脑。烧录前先断开 SWD 回接跳线。
-
-先确认电脑识别到外置探针：
-
-```sh
 probe-rs list
-```
-
-列表中应该有助教提供的探针型号。如果 DM-MC02 已经烧过本作业固件并接着 USB-C，列表里还会出现 `DM-MC02 CMSIS-DAP Demo`。这个演示接口只回答设备发现，不能用来烧录。probe-rs 要求选择探针时，选外置探针；也可以直接按 `probe-rs list` 显示的 VID:PID 指定：
-
-```sh
-probe-rs run --probe VID:PID --chip STM32H723VGTx --protocol swd target/thumbv7em-none-eabihf/debug/dm-mc02-cmsis-dap
-```
-
-常见问题：
-
-| 现象 | 先检查 |
-| --- | --- |
-| `probe-rs list` 没有任何探针 | 探针 USB 线、驱动或 Linux udev 规则 |
-| 找到探针但连不上芯片 | SWD 接线方向、GND 是否共地、板子是否上电 |
-| 提示探针被占用 | 是否还有一个 `cargo run` / probe-rs 会话或 VS Code 调试器没有退出 |
-
-## 完成两项配置
-
-在 `src/wiring.rs` 补全两个 TODO。
-
-1. **SWD GPIO**。从板卡上选两个可接线的 3.3 V GPIO。SWCLK 用初始电平为低的 `Output`，SWDIO 用可切换方向的 `Flex`。记录 MCU 引脚和接插件脚号。可以从外露的 PWM 信号脚里选。
-2. **UART**。配置 TX、RX、中断和静态收发缓冲区，使用 115200 baud、8N1。有 P16 转接板可用 UART8。也可选板上独立的 UART7 接口，按原理图确认信号脚和方向。检查所选引脚与 SWD 是否冲突。
-
-[作业参考](references/README.md)提供达妙原理图和使用说明书的原件链接，以及 GPIO 和 Buffered UART 示例。
-
-## 已提供的内容
-
-- `src/board.rs` 提供 RCC、USB 和 CAN1 的配置。Classical CAN 使用 80 MHz 内核时钟、1 Mbit/s 和 75% 采样点。Prescaler 为 1，TSEG1 为 59 tq，TSEG2 与 SJW 均为 20 tq。
-- `src/dap_usb.rs` 提供 CMSIS-DAP v2 的 USB 枚举和少量 `DAP_Info` 应答。完成 GPIO 配置前，就可以检查 USB 是否列出两个串口和演示探针。[Arm DAP_Info 文档](https://arm-software.github.io/CMSIS-DAP/latest/group__DAP__Info.html)
-- `src/swd.rs` 提供读取 DPIDR 所需的 GPIO 时序。补全 SWD GPIO 后，用控制串口的 `SWD ID` 测试。GPIO 尚未配置时，命令回复 `ERR SWD_NOT_CONFIGURED`。
-
-## 烧录和验收
-
-完成 `src/wiring.rs` 后，按[准备工作](#4-烧录是怎么接起来的)接好外置探针并烧录：
-
-```sh
-cargo build --locked
 cargo run --locked
 ```
 
-看到烧录完成后按 Ctrl+C 退出 probe-rs。之后断电并拔掉外置探针。将选定的 SWCLK 和 SWDIO 接到目标板对应信号。可以用同一块 DM-MC02 的 P1 做自测。P1.3 是 SWCLK，P1.4 是 SWDIO。同板只接两根信号线。两板测试则接 SWCLK、SWDIO 和 GND，两板分别供电。按实物核对接插件方向，信号线接信号脚。
+`cargo run` 会通过项目 runner 烧录并启动 STM32，需有实际硬件。选择外置探针，不能选本板的 `DM-MC02 CMSIS-DAP Demo`。如果连接多个探针，用实际外置探针的 VID:PID 和序列号选择参数消除歧义后再烧录。烧录完成后 Ctrl+C 退出探针会话，板上程序继续运行。
 
-通过 USB-C 重新连接电脑。先激活准备工作中建好的 Python 虚拟环境。用 `python3 -m serial.tools.list_ports` 查看串口，用 `PING` 确认控制口。将下面的 `CONTROL_PORT` 和 `UART_PORT` 换成实际串口名。
+## 接线
 
-```sh
-probe-rs list
-python3 host.py CONTROL_PORT ping
-python3 host.py CONTROL_PORT swd
-python3 host.py CONTROL_PORT swd
-python3 host.py CONTROL_PORT ping
-python3 host.py UART_PORT uart-loopback
+以下为厂家 V1.0 原理图对应脚号，接线前核对实物版本、连接器方向和线序。
+
+| 用途 | MCU 引脚 | 板卡连接器 |
+|---|---|---|
+| CAN1 RX/TX | PD0 / PD1 | P2-1=CAN L，P2-2=CAN H，P2-3/4=GND |
+| 软件 SWCLK | PD14 | P16-11 → 目标 SWCLK |
+| 软件 SWDIO | PD15 | P16-9 → 目标 SWDIO |
+| UART8 RX | PE0 | P16-15 |
+| UART8 TX | PE1 | P16-17 |
+| 软件接口公共地 | GND | P16-1/3/5/7 中已核对的一脚 |
+
+软件 SWD 使用 3.3 V 逻辑，两板正确供电并共地。UART8 为 115200、8N1，无硬件流控，收发缓冲各 256 字节；回环仅短接 P16-15/17。
+
+CAN 对端使用正常模式、Classical CAN、1 Mbit/s，并共地。总线两个物理端点各放一个 120 Ω 端接，核对本板和对端已装电阻，避免重复端接。P16-10/12 是 CAN3，不用于本方案的 CAN1。板卡需由 USB 或规定电源供电，外置探针不代表 CAN 收发器已完整供电。
+
+## 主机运行
+
+用已安装的 Python 建立环境并安装依赖；已有 `.venv` 可跳过创建。若 `python` 不在 PATH，使用解释器的完整路径替换它。
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements-host.txt
+.\.venv\Scripts\python.exe host_bridge.py --list-ports
 ```
 
-检查 `probe-rs list` 是否列出 `DM-MC02 CMSIS-DAP Demo`，两次 DPIDR 是否一致，以及最后一次 `PING` 是否正常。作业的标准探针接口只验收发现，实际 SWD 读取用 `SWD ID`。UART 测试前用跳线短接所选 UART 的 TX 和 RX。脚本会逐字节核对回环数据。
+板卡有两个 CDC 串口。用 PING 找控制口，另一个口为 UART8。下面的 COM7、COM8 均需替换为实际端口；同一个端口只能由一个程序占用。
 
-## 提交
+```powershell
+.\.venv\Scripts\python.exe host.py COM7 ping
+.\.venv\Scripts\python.exe host_bridge.py COM7
+```
 
-交 `src/wiring.rs`、引脚表和实测记录。引脚表写清 SWCLK、SWDIO、UART TX 和 RX 的 MCU 引脚与接插件脚号。记录测试命令、结果和未测项目，并说明一项你用实测确认的配置。
+控制口预期回复 `OK DM-MC02`。桥接工具随后自动完成 HELLO 和 STREAM ON，持续显示 CAN 帧，不需要逐帧轮询。
 
-选做可用现成的 Classical CAN 与第二个节点交换帧，或继续尝试 CAN FD 和 Linux SocketCAN。
+| 交互输入 | 动作 |
+|---|---|
+| `123 A55A` | 发送 ID=123、两字节数据 A5 5A |
+| `123 -` | 发送零字节帧 |
+| `ping` | 基础控制 |
+| `swd` | 读取已接目标的 SWD DPIDR |
+| `stream off` / `stream on` | 停止/开启主动接收 |
+| `quit` | 关闭流和端口 |
+
+ID 按十六进制，不带 `0x`，范围 000–7FF；数据每字节两个 HEX 字符。只接收 30 秒：
+
+```powershell
+.\.venv\Scripts\python.exe host_bridge.py COM7 --receive-only --duration 30
+```
+
+退出桥接工具、释放控制口后，可单独运行原有入口：
+
+```powershell
+.\.venv\Scripts\python.exe host.py COM7 swd
+.\.venv\Scripts\python.exe host.py COM7 can-send 123 A55A
+.\.venv\Scripts\python.exe host.py COM7 can-recv
+.\.venv\Scripts\python.exe host.py COM8 uart-loopback
+```
+
+SWD 命令需要接好目标，UART 回环命令需要短接对应 TX/RX。
+
+## 线上协议与运行边界
+
+消息为 ASCII，以 LF 结束，也接受 CRLF。新连接先发送一个 LF 清理残留半行，再以新生成的 8 位 HEX nonce 同步；收到同 nonce 的 HELLO 回复后才处理当前会话数据。
+
+```text
+CAN HELLO 89ABCDEF                  → OK HELLO 89ABCDEF
+CAN STREAM 89ABCDEF ON              → OK STREAM 89ABCDEF ON
+CAN TX 89ABCDEF 123 2 A55A           → OK QUEUED 89ABCDEF
+CAN TX 89ABCDEF 123 0 -              → OK QUEUED 89ABCDEF
+CAN STREAM 89ABCDEF OFF             → OK STREAM 89ABCDEF OFF
+```
+
+设备主动上报格式为 `RX 89ABCDEF 321 2 A55A`，依次是会话编号、ID、十进制长度和数据。nonce 用于区分会话，不是认证。旧 `CAN TX <ID> <HEX>` 和 `CAN RX` 仅在 STREAM OFF 时可用；流模式下返回 `ERR STREAMING`。
+
+软件 TX/RX/回复队列容量为 16/32/8，单行输入 96 字节，回复最多 63 字节。TX 队列满返回 `ERR BUSY`；RX 队列满丢新帧并计数；CAN 提交、USB 写和回复入队各受 100 ms 限制。CAN 硬件发送使用 FIFO 模式，避免优先级模式同步取消旧帧的等待。
+
+非法字段返回 `ERR SYNTAX`、`ERR FRAME`、`ERR SESSION` 或 `ERR ENCODING`，超长行丢到下一 LF 后返回 `ERR LINE_TOO_LONG`。控制器提交超时返回 `ERR CAN TX`。`OK QUEUED` 只表示已提交控制器，不保证总线 ACK 或对端收到。
+
+DTR 关闭、端点错误、USB 写入或回复入队超时会废弃旧会话，清理未完成行和软件队列。主机超时或出错后关闭端口，重新运行工具生成新 nonce，不自动重发 TX。已交给 USB FIFO 或 CAN 控制器的数据不能撤回；旧 nonce 的消息由主机丢弃。旧脚本的兼容格式不提供同样的会话隔离保证。
+
+## 来源
+
+- [课程模板](https://github.com/HKUAstar/embedded-training-template)：保留板级初始化、UART、SWD DPIDR 和 DAP 发现基础，新增持续桥接、会话管理和主机工具。
+- [DM-MC02 V1.0 原理图](https://github.com/dmBots/DM-MC02/blob/master/drawings/2d/schematics/CtrBoard-H7_V1.0-240124.pdf)：接线依据。
+- Embassy STM32/USB 0.6.0、sync 0.8.0：包元数据声明 `MIT OR Apache-2.0`；pyserial 3.5：BSD。版本以 Cargo.lock 和 requirements-host.txt 为准。

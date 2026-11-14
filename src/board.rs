@@ -4,7 +4,7 @@ use embassy_stm32::{
     Config, Peri, Peripherals, bind_interrupts,
     can::{
         Can, CanConfigurator, IT0InterruptHandler, IT1InterruptHandler,
-        config::{FrameTransmissionConfig, NominalBitTiming},
+        config::{FrameTransmissionConfig, NominalBitTiming, TxBufferMode},
     },
     peripherals,
     rcc::{
@@ -78,7 +78,9 @@ pub fn can1(
     let config = can
         .config()
         .set_nominal_bit_timing(timing)
-        .set_frame_transmit(FrameTransmissionConfig::ClassicCanOnly);
+        .set_frame_transmit(FrameTransmissionConfig::ClassicCanOnly)
+        // FIFO 满时异步等待，不走默认优先级模式的同步取消旧帧分支。
+        .set_tx_buffer_mode(TxBufferMode::Fifo);
     can.set_config(config);
     can.into_normal_mode()
 }
