@@ -25,6 +25,7 @@ use static_cell::StaticCell;
 
 use crate::{PACKET, board::Usb, control, swd::Swd};
 
+// 缓存配置：分别限制待发请求、接收帧和控制回复，防止主机阻塞时无限占用内存。
 const TX_CAPACITY: usize = 16;
 const RX_CAPACITY: usize = 32;
 const REPLY_CAPACITY: usize = 8;
@@ -185,7 +186,8 @@ impl Shared {
     }
 }
 
-/// 从 main 的 join4 实际调用。join 并发轮询所有 future，不需要另外创建线程。
+/// 桥接入口：将 CAN 和 USB 按收发方向拆开，再运行五个异步任务。
+/// 每个外设方向只有一个拥有者，任务间通过队列传递数据。
 pub async fn run(usb: CdcAcmClass<'static, Usb>, can: Can<'static>, swd: Option<Swd>) {
     static SHARED: StaticCell<Shared> = StaticCell::new();
     let shared = SHARED.init(Shared::new());
@@ -207,6 +209,7 @@ pub async fn run(usb: CdcAcmClass<'static, Usb>, can: Can<'static>, swd: Option<
     .await;
 }
 
+// 会话监测：DTR 变化后更新连接状态，通知等待中的收发任务。
 async fn session_task(control: ControlChanged<'static>, shared: &Shared) {
     shared.set_connected(control.dtr());
     loop {
@@ -216,6 +219,7 @@ async fn session_task(control: ControlChanged<'static>, shared: &Shared) {
     }
 }
 
+// 主机接收：组行、解析和校验会话，CAN 请求入队后由发送任务处理。
 async fn host_rx_task(
     mut usb: Receiver<'static, Usb>,
     mut swd: Option<Swd>,
@@ -284,6 +288,7 @@ async fn host_rx_task(
     }
 }
 
+// 命令分派：HELLO 建立会话，STREAM 切换上报模式，TX 入队，基础命令保留。
 async fn dispatch(
     command: Command,
     tag: SessionTag,
@@ -352,6 +357,7 @@ async fn dispatch(
     Some(tag)
 }
 
+// 兼容旧 CAN RX：只在流关闭时从软件队列取帧，不另开硬件接收者。
 async fn poll_one_frame(
     tag: SessionTag,
     shared: &Shared,
@@ -392,6 +398,7 @@ async fn poll_one_frame(
     }
 }
 
+// CAN 发送：提交前再次检查会话，提交成功后才生成 OK QUEUED。
 async fn can_tx_task(mut can: CanTx<'static>, shared: &Shared, mut changes: Changes<'_>) {
     loop {
         yield_now().await;
@@ -460,6 +467,7 @@ async fn can_tx_task(mut can: CanTx<'static>, shared: &Shared, mut changes: Chan
     }
 }
 
+// CAN 接收：持续排空硬件接收通道，只接收标准 Classical CAN 数据帧。
 async fn can_rx_task(mut can: CanRx<'static>, shared: &Shared) {
     loop {
         // 即使硬件一直有数据，也显式让其他任务获得一次调度机会。
@@ -533,6 +541,7 @@ fn next_output(shared: &Shared, streaming: bool, burst: &mut usize) -> Option<Ou
     None
 }
 
+// USB 发送：统一输出控制回复和主动 RX，写入前检查会话和订阅代号。
 async fn host_tx_task(mut usb: Sender<'static, Usb>, shared: &Shared, mut changes: Changes<'_>) {
     let mut burst = 0;
     let mut phase = None;

@@ -8,7 +8,7 @@ use crate::{
     protocol::{Command, Line, ParseError},
 };
 
-/// 将行缓冲与它所属的会话代号放在一起，防止跨连接续接半条命令。
+/// 半行归属：保存产生该半行的 generation，连接变化后不能继续拼接旧输入。
 pub struct SessionLine {
     line: Line,
     generation: Option<u64>,

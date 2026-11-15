@@ -79,7 +79,8 @@ pub fn can1(
         .config()
         .set_nominal_bit_timing(timing)
         .set_frame_transmit(FrameTransmissionConfig::ClassicCanOnly)
-        // FIFO 满时异步等待，不走默认优先级模式的同步取消旧帧分支。
+        // 本次修改：硬件发送使用 FIFO，满时进入异步等待，由桥接任务限制等待时间。
+        // 避免默认优先级模式同步取消旧帧时占住执行器。
         .set_tx_buffer_mode(TxBufferMode::Fifo);
     can.set_config(config);
     can.into_normal_mode()

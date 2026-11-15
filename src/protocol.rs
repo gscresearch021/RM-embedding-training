@@ -1,7 +1,7 @@
 //! CAN 与主机通信的纯协议层：类型、逐字节组行、命令解析和回复编码。
 //!
-//! 本模块只依赖 core，不读写 USB/CAN，不校验会话是否仍有效。
-//! HELLO、STREAM 和带会话编号的 TX 能被解析，不等于对应桥接任务已经运行。
+//! 协议处理：将完整命令解析为拥有自身数据的结构，再按固定格式编码回复。
+//! 这里只检查字段格式；当前会话是否有效和实际外设收发由桥接模块处理。
 
 use core::fmt::{self, Write};
 
@@ -65,7 +65,7 @@ impl CanFrame {
     }
 }
 
-/// 带会话标记的发送请求，保留你已经建立的四个字段。
+/// 发送请求：保存会话编号、CAN ID、有效长度和数据。
 /// 请求拥有全部数据，后续可放入队列，不会引用被下一包覆盖的文本缓冲。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CanTxRequest {
@@ -76,7 +76,7 @@ pub struct CanTxRequest {
 }
 
 impl CanTxRequest {
-    /// 保留最初的 Option 接口；这里只接受带 nonce 和显式长度的新 TX 格式。
+    /// 解析带会话编号和显式长度的 TX；其他命令或格式错误返回 None。
     pub fn parse(command: &str) -> Option<Self> {
         // .ok()? 把解析失败转换成 None；成功后只提取 CanTx 这个枚举分支。
         match Command::parse(command).ok()? {

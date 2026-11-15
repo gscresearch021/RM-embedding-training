@@ -139,6 +139,7 @@ impl Session {
         true
     }
 
+    // 会话重置：使旧队列标记失效，清 nonce 并关闭流；不撤回已交给硬件的数据。
     fn restart(&mut self) {
         // wrapping_add 明确选择计数回绕，避免整数溢出导致 panic。
         // 在代号完整回绕前，旧标记不会重合；它不是无限长或加密标识。

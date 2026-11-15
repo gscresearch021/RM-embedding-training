@@ -48,9 +48,11 @@ async fn main(_spawner: Spawner) {
     );
     builder.msos_descriptor(0x0603_0000, 0x20);
     let dap = dap_usb::DapUsb::new(&mut builder);
+    // 两个 CDC 分别用于 CAN/控制命令和 UART8，扩展沿用原有 USB 接口。
     let control = CdcAcmClass::new(&mut builder, CTL_STATE.init(State::new()), PACKET as u16);
     let serial = CdcAcmClass::new(&mut builder, UART_STATE.init(State::new()), PACKET as u16);
     let mut device = builder.build();
+    // 本次扩展入口：控制口交给桥接任务，原 USB、UART 和 DAP 继续运行。
     join4(
         device.run(),
         can_bridge::run(control, ports.can, swd),

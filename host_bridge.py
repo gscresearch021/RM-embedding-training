@@ -140,6 +140,7 @@ class Pending:
     enabled: bool | None = None
 
 
+# 主机端：命令回复和主动 RX 共用一个读取入口，键盘线程不访问串口。
 class BridgeClient:
     """串口只在 poll_once 中读取；所有命令最多保留一个待回复请求。"""
 
@@ -232,6 +233,7 @@ class BridgeClient:
             if message is not None:
                 self._accept(message)
 
+    # 请求处理：只允许一个待回复命令，等待期间继续接收 RX；超时不重发 TX。
     def _request(self, command: str, kind: str, *, enabled: bool | None = None,
                  timeout: float | None = None, prefix: bytes = b"") -> Message:
         if self.failed:

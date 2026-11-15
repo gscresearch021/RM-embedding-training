@@ -1,126 +1,86 @@
-# DM-MC02 USB 调试器与 CAN 桥接
+# DM-MC02 USB 调试器作业
 
-基于 STM32H723VG，提供 USB↔CAN 持续双向桥接、UART8 串口转发、GPIO SWD DPIDR 读取和 CMSIS-DAP 演示接口。CAN 使用标准 11 位数据帧、0–8 字节、1 Mbit/s。
+## 完成内容
 
-固件已完成目标编译和链接；硬件通信尚未上板验证。CMSIS-DAP 接口只支持设备发现，不能代替外置探针烧录或执行完整调试。
+1. 配置软件 SWD 和 UART8。软件 SWD 使用 PD14、PD15，UART8 使用 PE0、PE1，收发缓冲区各 256 字节。
+2. 完成 CAN 与 USB 主机的持续双向桥接。主机请求经过解析、会话校验和队列进入 CAN 发送路径；CAN 接收帧经队列主动上报主机。
+3. 将 USB 接收、USB 发送、CAN 接收、CAN 发送和会话监测分别放入异步任务。保留原有 UART 转发、SWD DPIDR 读取和 DAP 发现接口。
+4. 完成分包、粘包、超长输入、队列满、断连和超时处理。通过会话编号区分重连前后的数据，流模式下无需反复发送 `CAN RX`。
+5. 新增 `host_bridge.py`，用于持续收帧和交互发送。主机端只保留一个串口读取入口、一个待回复请求，发送超时不自动重发。
 
-## 文件
+主要修改位置：`wiring.rs` 为引脚和 UART 配置，`can_bridge.rs` 为桥接任务，`protocol.rs` 为协议解析，`bridge_state.rs`、`bridge_input.rs` 为会话和半行管理；`main.rs` 接入运行入口，`host_bridge.py` 提供主机端操作。`board.rs` 将 CAN 硬件发送改为 FIFO 模式，时钟和位时序沿用原配置。
 
-| 文件 | 用途 |
+## 验收参数
+
+### 板卡与接口
+
+| 项目 | 参数 |
 |---|---|
-| `src/` | 固件源码；`main.rs` 启动 USB、桥接、UART 与 DAP |
-| `Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml` | 构建配置与固定依赖版本 |
-| `.cargo/config.toml`、`memory.x` | STM32 编译目标、烧录命令和内存布局 |
-| `host_bridge.py` | 持续 CAN 收发工具 |
-| `host.py` | 基础控制、SWD、CAN 轮询和 UART 回环入口 |
-| `requirements-host.txt` | Python 运行依赖 |
+| MCU / 编译目标 | STM32H723VG / `thumbv7em-none-eabihf` |
+| Rust / Cargo | 1.99.1，依赖版本见 `Cargo.lock` |
+| Python 依赖 | pyserial 3.5，见 `requirements-host.txt` |
+| USB 标识 | VID=`0xC0DE`，PID=`0xCAFC`，产品名 `DM-MC02 CMSIS-DAP Demo` |
+| USB 接口 / 包长 | 两个 CDC 串口、一个 DAP 演示接口 / 64 字节 |
+| 软件 SWCLK | PD14，P16-11 |
+| 软件 SWDIO | PD15，P16-9 |
+| UART8 RX / TX | PE0，P16-15 / PE1，P16-17 |
+| UART8 格式 | 115200 baud，8 数据位，无校验，1 停止位，无硬件流控 |
+| UART8 缓冲区 | TX、RX 各 256 字节 |
+| CAN1 RX / TX | PD0 / PD1 |
+| CAN1 接口 | P2-1=CAN L，P2-2=CAN H，P2-3/4=GND |
+| 软件接口地线 | P16-1、3、5、7 中已核对的一脚 |
+| 本板硬件 SWD 接口 | P1-1=3.3 V，P1-2=GND，P1-3=SWCLK，P1-4=SWDIO |
 
-## 编译与烧录
+接插件脚号依据 DM-MC02 V1.0 原理图，实物版本和线序尚待到板后核对。软件 SWD 为 3.3 V 逻辑。P16-10/12 为 CAN3，不用于本次 CAN1。DAP 接口只支持设备发现，实际 SWD 功能通过控制口读取 DPIDR。
 
-电脑需要 Rust/rustup、Python 3.10 或以上；Windows 还需 MSVC C++ 生成工具和 Windows SDK。Rust 工具链固定为 1.99.1，目标为 `thumbv7em-none-eabihf`，由工具链文件指定。
+### CAN 与缓存
 
-在仓库根目录执行：
-
-```powershell
-cargo build --locked
-```
-
-生成的 ELF 为 `target/thumbv7em-none-eabihf/debug/dm-mc02-cmsis-dap`。
-
-首次烧录使用外置 SWD 探针，板卡另行正确供电；移除软件 SWD 回接跳线后，外置探针接 P1：SWCLK→3、SWDIO→4、GND→2。P1-1 的 3.3 V 根据探针的 VTref/供电定义连接，不并接未知电源输出。
-
-```powershell
-cargo install probe-rs-tools --locked
-probe-rs list
-cargo run --locked
-```
-
-`cargo run` 会通过项目 runner 烧录并启动 STM32，需有实际硬件。选择外置探针，不能选本板的 `DM-MC02 CMSIS-DAP Demo`。如果连接多个探针，用实际外置探针的 VID:PID 和序列号选择参数消除歧义后再烧录。烧录完成后 Ctrl+C 退出探针会话，板上程序继续运行。
-
-## 接线
-
-以下为厂家 V1.0 原理图对应脚号，接线前核对实物版本、连接器方向和线序。
-
-| 用途 | MCU 引脚 | 板卡连接器 |
-|---|---|---|
-| CAN1 RX/TX | PD0 / PD1 | P2-1=CAN L，P2-2=CAN H，P2-3/4=GND |
-| 软件 SWCLK | PD14 | P16-11 → 目标 SWCLK |
-| 软件 SWDIO | PD15 | P16-9 → 目标 SWDIO |
-| UART8 RX | PE0 | P16-15 |
-| UART8 TX | PE1 | P16-17 |
-| 软件接口公共地 | GND | P16-1/3/5/7 中已核对的一脚 |
-
-软件 SWD 使用 3.3 V 逻辑，两板正确供电并共地。UART8 为 115200、8N1，无硬件流控，收发缓冲各 256 字节；回环仅短接 P16-15/17。
-
-CAN 对端使用正常模式、Classical CAN、1 Mbit/s，并共地。总线两个物理端点各放一个 120 Ω 端接，核对本板和对端已装电阻，避免重复端接。P16-10/12 是 CAN3，不用于本方案的 CAN1。板卡需由 USB 或规定电源供电，外置探针不代表 CAN 收发器已完整供电。
-
-## 主机运行
-
-用已安装的 Python 建立环境并安装依赖；已有 `.venv` 可跳过创建。若 `python` 不在 PATH，使用解释器的完整路径替换它。
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements-host.txt
-.\.venv\Scripts\python.exe host_bridge.py --list-ports
-```
-
-板卡有两个 CDC 串口。用 PING 找控制口，另一个口为 UART8。下面的 COM7、COM8 均需替换为实际端口；同一个端口只能由一个程序占用。
-
-```powershell
-.\.venv\Scripts\python.exe host.py COM7 ping
-.\.venv\Scripts\python.exe host_bridge.py COM7
-```
-
-控制口预期回复 `OK DM-MC02`。桥接工具随后自动完成 HELLO 和 STREAM ON，持续显示 CAN 帧，不需要逐帧轮询。
-
-| 交互输入 | 动作 |
+| 项目 | 参数 |
 |---|---|
-| `123 A55A` | 发送 ID=123、两字节数据 A5 5A |
-| `123 -` | 发送零字节帧 |
-| `ping` | 基础控制 |
-| `swd` | 读取已接目标的 SWD DPIDR |
-| `stream off` / `stream on` | 停止/开启主动接收 |
-| `quit` | 关闭流和端口 |
+| CAN 类型 | Classical CAN，标准 11 位数据帧，ID=`000`–`7FF`，数据长度 0–8 字节 |
+| CAN 内核时钟 / 位率 | 80 MHz / 1 Mbit/s |
+| 预分频 / 时间段 1 / 时间段 2 / SJW | 1 / 59 tq / 20 tq / 20 tq |
+| 采样点 / 硬件发送模式 | 75% / FIFO |
+| CAN 对端 / 端接 | 正常模式、1 Mbit/s；总线两端各 120 Ω，核对板上已装端接 |
+| 软件 TX / RX / 回复队列 | 16 请求 / 32 帧 / 8 条 |
+| 输入行 / 回复上限 | 96 字节 / 63 字节；输入上限不含 LF，CRLF 中的 CR 占一个字节 |
+| CAN 提交 / USB 写入 / 回复入队等待 | 各 100 ms |
+| 旧格式 CAN RX 等待 | 100 ms |
+| 默认流模式 | OFF；主机完成 HELLO 后显式开启 STREAM |
+| USB 发送调度 | 最多连续发送 4 条控制回复后，有接收帧时上报一帧 |
 
-ID 按十六进制，不带 `0x`，范围 000–7FF；数据每字节两个 HEX 字符。只接收 30 秒：
+TX 队列满时返回 `ERR BUSY`；RX 队列满时丢弃新帧并计数。超长输入丢弃到下一 LF，再接收新行。DTR 关闭或端点错误会清理会话；USB 写入、回复入队超时会使当前协议会话失效。已交给硬件的数据不承诺撤回。
 
-```powershell
-.\.venv\Scripts\python.exe host_bridge.py COM7 --receive-only --duration 30
-```
+### 主机端
 
-退出桥接工具、释放控制口后，可单独运行原有入口：
+| 项目 | 参数 |
+|---|---|
+| 控制串口 | 实际枚举的控制 CDC 端口；另一个 CDC 用于 UART8 |
+| 串口配置 | 115200 baud；CAN 总线位率另按上表配置 |
+| 单次读取 / 写入超时 | 50 ms / 1 s |
+| 命令回复超时 | 默认 3 s，可用 `--timeout` 指定 |
+| 退出时停止流的等待 | 最多 0.5 s |
+| 待回复请求 / 键盘输入队列 | 1 个 / 16 行 |
+| 会话编号 | 每次连接随机生成的 8 位 HEX nonce，重连重新同步 |
 
-```powershell
-.\.venv\Scripts\python.exe host.py COM7 swd
-.\.venv\Scripts\python.exe host.py COM7 can-send 123 A55A
-.\.venv\Scripts\python.exe host.py COM7 can-recv
-.\.venv\Scripts\python.exe host.py COM8 uart-loopback
-```
+## 验收接口与状态
 
-SWD 命令需要接好目标，UART 回环命令需要短接对应 TX/RX。
+消息使用 ASCII，以 LF 结束，接受 CRLF。以下以会话编号 `89ABCDEF` 为例，实际编号由主机工具生成。
 
-## 线上协议与运行边界
+| 请求或消息 | 回复或含义 |
+|---|---|
+| `PING` | `OK DM-MC02` |
+| `SWD ID` | `OK DPIDR <8位HEX>`，需要连接实际目标 |
+| `CAN HELLO 89ABCDEF` | `OK HELLO 89ABCDEF` |
+| `CAN STREAM 89ABCDEF ON` / `OFF` | `OK STREAM 89ABCDEF ON` / `OFF` |
+| `CAN TX 89ABCDEF 123 2 A55A` | `OK QUEUED 89ABCDEF` |
+| `CAN TX 89ABCDEF 123 0 -` | 零字节数据帧 |
+| `RX 89ABCDEF 321 2 A55A` | 主动上报：会话编号、ID、十进制长度、HEX 数据 |
 
-消息为 ASCII，以 LF 结束，也接受 CRLF。新连接先发送一个 LF 清理残留半行，再以新生成的 8 位 HEX nonce 同步；收到同 nonce 的 HELLO 回复后才处理当前会话数据。
+旧 `CAN TX <ID> <HEX>`、`CAN RX` 在 STREAM OFF 时保留原格式；STREAM ON 时返回 `ERR STREAMING`。错误会话编号返回 `ERR SESSION`。`OK QUEUED` 表示已提交 CAN 控制器，不表示总线 ACK 或对端已收到。
 
-```text
-CAN HELLO 89ABCDEF                  → OK HELLO 89ABCDEF
-CAN STREAM 89ABCDEF ON              → OK STREAM 89ABCDEF ON
-CAN TX 89ABCDEF 123 2 A55A           → OK QUEUED 89ABCDEF
-CAN TX 89ABCDEF 123 0 -              → OK QUEUED 89ABCDEF
-CAN STREAM 89ABCDEF OFF             → OK STREAM 89ABCDEF OFF
-```
+编译验收命令为 `cargo build --locked`，固件产物为 `target/thumbv7em-none-eabihf/debug/dm-mc02-cmsis-dap`。主机入口为 `host_bridge.py <控制端口>`；`--receive-only --duration 30` 表示仅持续接收 30 秒。基础控制、SWD 和 UART 回环入口保留在 `host.py`。
 
-设备主动上报格式为 `RX 89ABCDEF 321 2 A55A`，依次是会话编号、ID、十进制长度和数据。nonce 用于区分会话，不是认证。旧 `CAN TX <ID> <HEX>` 和 `CAN RX` 仅在 STREAM OFF 时可用；流模式下返回 `ERR STREAMING`。
+当前已完成软件实现和目标编译链接；暂无硬件，实际 USB/CAN 收发、SWD 读数、UART 回环及断连恢复尚未上板验收。
 
-软件 TX/RX/回复队列容量为 16/32/8，单行输入 96 字节，回复最多 63 字节。TX 队列满返回 `ERR BUSY`；RX 队列满丢新帧并计数；CAN 提交、USB 写和回复入队各受 100 ms 限制。CAN 硬件发送使用 FIFO 模式，避免优先级模式同步取消旧帧的等待。
-
-非法字段返回 `ERR SYNTAX`、`ERR FRAME`、`ERR SESSION` 或 `ERR ENCODING`，超长行丢到下一 LF 后返回 `ERR LINE_TOO_LONG`。控制器提交超时返回 `ERR CAN TX`。`OK QUEUED` 只表示已提交控制器，不保证总线 ACK 或对端收到。
-
-DTR 关闭、端点错误、USB 写入或回复入队超时会废弃旧会话，清理未完成行和软件队列。主机超时或出错后关闭端口，重新运行工具生成新 nonce，不自动重发 TX。已交给 USB FIFO 或 CAN 控制器的数据不能撤回；旧 nonce 的消息由主机丢弃。旧脚本的兼容格式不提供同样的会话隔离保证。
-
-## 来源
-
-- [课程模板](https://github.com/HKUAstar/embedded-training-template)：保留板级初始化、UART、SWD DPIDR 和 DAP 发现基础，新增持续桥接、会话管理和主机工具。
-- [DM-MC02 V1.0 原理图](https://github.com/dmBots/DM-MC02/blob/master/drawings/2d/schematics/CtrBoard-H7_V1.0-240124.pdf)：接线依据。
-- Embassy STM32/USB 0.6.0、sync 0.8.0：包元数据声明 `MIT OR Apache-2.0`；pyserial 3.5：BSD。版本以 Cargo.lock 和 requirements-host.txt 为准。
+基础代码来自 [课程模板](https://github.com/HKUAstar/embedded-training-template)，引脚依据 [DM-MC02 V1.0 原理图](https://github.com/dmBots/DM-MC02/blob/master/drawings/2d/schematics/CtrBoard-H7_V1.0-240124.pdf)。Embassy STM32/USB 0.6.0、sync 0.8.0 为 `MIT OR Apache-2.0`，pyserial 3.5 为 BSD。
