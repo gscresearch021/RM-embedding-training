@@ -1,3 +1,10 @@
 /target
 /.venv
 __pycache__/
+
+# Local editor settings, test assets and working records
+/.vscode/
+/docs/
+/tests/
+/scripts/
+/references/

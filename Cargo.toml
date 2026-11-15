@@ -3,6 +3,17 @@ name = "dm-mc02-cmsis-dap"
 version = "0.1.0"
 edition = "2024"
 publish = false
+autotests = false
+
+[lib]
+test = false
+bench = false
+
+[[bin]]
+name = "dm-mc02-cmsis-dap"
+path = "src/main.rs"
+test = false
+bench = false
 
 [dependencies]
 cortex-m = { version = "=0.7.9", features = ["critical-section-single-core"] }
@@ -10,6 +21,7 @@ cortex-m-rt = "=0.7.7"
 embassy-executor = { version = "=0.10.0", features = ["platform-cortex-m", "executor-thread"] }
 embassy-futures = "=0.1.2"
 embassy-stm32 = { version = "=0.6.0", default-features = false, features = ["stm32h723vg", "rt", "time-driver-tim2"] }
+embassy-sync = "=0.8.0"
 embassy-time = { version = "=0.5.1", features = ["tick-hz-1_000_000"] }
 embassy-usb = { version = "=0.6.0", default-features = false, features = ["max-interface-count-5"] }
 embedded-can = "=0.4.1"
