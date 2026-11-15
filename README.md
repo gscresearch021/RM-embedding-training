@@ -31,7 +31,6 @@
 | 软件接口地线 | P16-1、3、5、7 中已核对的一脚 |
 | 本板硬件 SWD 接口 | P1-1=3.3 V，P1-2=GND，P1-3=SWCLK，P1-4=SWDIO |
 
-接插件脚号依据 DM-MC02 V1.0 原理图，实物版本和线序尚待到板后核对。软件 SWD 为 3.3 V 逻辑。P16-10/12 为 CAN3，不用于本次 CAN1。DAP 接口只支持设备发现，实际 SWD 功能通过控制口读取 DPIDR。
 
 ### CAN 与缓存
 
@@ -49,7 +48,6 @@
 | 默认流模式 | OFF；主机完成 HELLO 后显式开启 STREAM |
 | USB 发送调度 | 最多连续发送 4 条控制回复后，有接收帧时上报一帧 |
 
-TX 队列满时返回 `ERR BUSY`；RX 队列满时丢弃新帧并计数。超长输入丢弃到下一 LF，再接收新行。DTR 关闭或端点错误会清理会话；USB 写入、回复入队超时会使当前协议会话失效。已交给硬件的数据不承诺撤回。
 
 ### 主机端
 
@@ -77,10 +75,3 @@ TX 队列满时返回 `ERR BUSY`；RX 队列满时丢弃新帧并计数。超长
 | `CAN TX 89ABCDEF 123 0 -` | 零字节数据帧 |
 | `RX 89ABCDEF 321 2 A55A` | 主动上报：会话编号、ID、十进制长度、HEX 数据 |
 
-旧 `CAN TX <ID> <HEX>`、`CAN RX` 在 STREAM OFF 时保留原格式；STREAM ON 时返回 `ERR STREAMING`。错误会话编号返回 `ERR SESSION`。`OK QUEUED` 表示已提交 CAN 控制器，不表示总线 ACK 或对端已收到。
-
-编译验收命令为 `cargo build --locked`，固件产物为 `target/thumbv7em-none-eabihf/debug/dm-mc02-cmsis-dap`。主机入口为 `host_bridge.py <控制端口>`；`--receive-only --duration 30` 表示仅持续接收 30 秒。基础控制、SWD 和 UART 回环入口保留在 `host.py`。
-
-当前已完成软件实现和目标编译链接；暂无硬件，实际 USB/CAN 收发、SWD 读数、UART 回环及断连恢复尚未上板验收。
-
-基础代码来自 [课程模板](https://github.com/HKUAstar/embedded-training-template)，引脚依据 [DM-MC02 V1.0 原理图](https://github.com/dmBots/DM-MC02/blob/master/drawings/2d/schematics/CtrBoard-H7_V1.0-240124.pdf)。Embassy STM32/USB 0.6.0、sync 0.8.0 为 `MIT OR Apache-2.0`，pyserial 3.5 为 BSD。
