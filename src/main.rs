@@ -11,7 +11,6 @@ mod wiring;
 use board::Usb;
 use embassy_executor::Spawner;
 use embassy_futures::{join::join4, select::select};
-use embassy_stm32::usart::BufferedUart;
 use embassy_usb::{
     Builder,
     class::cdc_acm::{CdcAcmClass, State},
@@ -48,7 +47,7 @@ async fn main(_spawner: Spawner) {
     );
     builder.msos_descriptor(0x0603_0000, 0x20);
     let dap = dap_usb::DapUsb::new(&mut builder);
-    // 两个 CDC 分别用于 CAN/控制命令和 UART8，扩展沿用原有 USB 接口。
+    // 两个 CDC 分别用于 CAN/控制命令和 PA2/PA0 串口，扩展沿用原有 USB 接口。
     let control = CdcAcmClass::new(&mut builder, CTL_STATE.init(State::new()), PACKET as u16);
     let serial = CdcAcmClass::new(&mut builder, UART_STATE.init(State::new()), PACKET as u16);
     let mut device = builder.build();
@@ -62,11 +61,14 @@ async fn main(_spawner: Spawner) {
     .await;
 }
 
-async fn uart_port(usb: CdcAcmClass<'static, Usb>, uart: Option<BufferedUart<'static>>) {
-    let Some(uart) = uart else {
+async fn uart_port(usb: CdcAcmClass<'static, Usb>, uart: Option<wiring::UartPort>) {
+    let Some(mut uart) = uart else {
         return;
     };
-    let (mut serial_out, mut serial_in) = uart.split();
+    // 仅取 USART2 的发送半部和 UART4 的接收半部，两个完整驱动始终保留。
+    // 回传只来自 PA0 的真实接收；不把 PA2 发送外设的本地读回当作回环结果。
+    let (mut serial_out, _unused_tx_receiver) = uart.tx.split_ref();
+    let (_unused_rx_transmitter, mut serial_in) = uart.rx.split_ref();
     let (mut usb_out, mut usb_in) = usb.split();
     loop {
         usb_in.wait_connection().await;
