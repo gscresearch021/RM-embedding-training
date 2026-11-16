@@ -1,77 +1,60 @@
 # DM-MC02 USB 调试器作业
 
-## 完成内容
+## SWD GPIO 配置
 
-1. 配置软件 SWD 和 UART8。软件 SWD 使用 PD14、PD15，UART8 使用 PE0、PE1，收发缓冲区各 256 字节。
-2. 完成 CAN 与 USB 主机的持续双向桥接。主机请求经过解析、会话校验和队列进入 CAN 发送路径；CAN 接收帧经队列主动上报主机。
-3. 将 USB 接收、USB 发送、CAN 接收、CAN 发送和会话监测分别放入异步任务。保留原有 UART 转发、SWD DPIDR 读取和 DAP 发现接口。
-4. 完成分包、粘包、超长输入、队列满、断连和超时处理。通过会话编号区分重连前后的数据，流模式下无需反复发送 `CAN RX`。
-5. 新增 `host_bridge.py`，用于持续收帧和交互发送。主机端只保留一个串口读取入口、一个待回复请求，发送超时不自动重发。
+在 `src/wiring.rs` 中，选用 PWM 接口的 PE13 作为 SWCLK，以初始低电平的 `Output` 输出时钟；PE9 作为 SWDIO，通过 `Flex` 切换输入和输出。两根引脚均按 3.3 V GPIO 使用，并交给 `Swd::new` 完成 DPIDR 读取。
 
-主要修改位置：`wiring.rs` 为引脚和 UART 配置，`can_bridge.rs` 为桥接任务，`protocol.rs` 为协议解析，`bridge_state.rs`、`bridge_input.rs` 为会话和半行管理；`main.rs` 接入运行入口，`host_bridge.py` 提供主机端操作。`board.rs` 将 CAN 硬件发送改为 FIFO 模式，时钟和位时序沿用原配置。
+## UART 配置
 
-## 验收参数
+串口使用 PWM 接口的 PA2 和 PA0。USART2 从 PA2 发送，UART4 通过单线模式从 PA0 接收，参数为 115200 baud、8 数据位、无校验、1 停止位。
 
-### 板卡与接口
+在 `src/wiring.rs` 中绑定 USART2、UART4 的缓冲串口中断，并通过 `StaticCell` 分配四块各 256 字节的静态缓冲区。主机发送使用 USART2 的 TX 缓冲，主机接收使用 UART4 的 RX 缓冲。`UartPort` 保存两个驱动，`src/main.rs` 使用 `split_ref` 取得对应的发送和接收半部，完成 USB 与串口之间的字节转发。
 
-| 项目 | 参数 |
-|---|---|
-| MCU / 编译目标 | STM32H723VG / `thumbv7em-none-eabihf` |
-| Rust / Cargo | 1.99.1，依赖版本见 `Cargo.lock` |
-| Python 依赖 | pyserial 3.5，见 `requirements-host.txt` |
-| USB 标识 | VID=`0xC0DE`，PID=`0xCAFC`，产品名 `DM-MC02 CMSIS-DAP Demo` |
-| USB 接口 / 包长 | 两个 CDC 串口、一个 DAP 演示接口 / 64 字节 |
-| 软件 SWCLK | PD14，P16-11 |
-| 软件 SWDIO | PD15，P16-9 |
-| UART8 RX / TX | PE0，P16-15 / PE1，P16-17 |
-| UART8 格式 | 115200 baud，8 数据位，无校验，1 停止位，无硬件流控 |
-| UART8 缓冲区 | TX、RX 各 256 字节 |
-| CAN1 RX / TX | PD0 / PD1 |
-| CAN1 接口 | P2-1=CAN L，P2-2=CAN H，P2-3/4=GND |
-| 软件接口地线 | P16-1、3、5、7 中已核对的一脚 |
-| 本板硬件 SWD 接口 | P1-1=3.3 V，P1-2=GND，P1-3=SWCLK，P1-4=SWDIO |
+SWD 使用 PE13、PE9，串口使用 PA2、PA0，四路信号分别占用独立的 MCU 引脚。
 
+## 引脚表
 
-### CAN 与缓存
+| 信号 | MCU 引脚 | 接插件信号脚 | 本次实测接法 |
+|---|---|---|---|
+| SWCLK | PE13 | P11-4，PWM 第 1 行信号脚 | 接本板 P1-3 / PA14 / SWCLK |
+| SWDIO | PE9 | P11-3，PWM 第 2 行信号脚 | 接本板 P1-4 / PA13 / SWDIO |
+| UART TX | PA2 | P11-2，PWM 第 3 行信号脚 | 接 P11-1 / PA0，形成回环 |
+| UART RX | PA0 | P11-1，PWM 第 4 行信号脚 | 接 P11-2 / PA2，形成回环 |
 
-| 项目 | 参数 |
-|---|---|
-| CAN 类型 | Classical CAN，标准 11 位数据帧，ID=`000`–`7FF`，数据长度 0–8 字节 |
-| CAN 内核时钟 / 位率 | 80 MHz / 1 Mbit/s |
-| 预分频 / 时间段 1 / 时间段 2 / SJW | 1 / 59 tq / 20 tq / 20 tq |
-| 采样点 / 硬件发送模式 | 75% / FIFO |
-| CAN 对端 / 端接 | 正常模式、1 Mbit/s；总线两端各 120 Ω，核对板上已装端接 |
-| 软件 TX / RX / 回复队列 | 16 请求 / 32 帧 / 8 条 |
-| 输入行 / 回复上限 | 96 字节 / 63 字节；输入上限不含 LF，CRLF 中的 CR 占一个字节 |
-| CAN 提交 / USB 写入 / 回复入队等待 | 各 100 ms |
-| 旧格式 CAN RX 等待 | 100 ms |
-| 默认流模式 | OFF；主机完成 HELLO 后显式开启 STREAM |
-| USB 发送调度 | 最多连续发送 4 条控制回复后，有接收帧时上报一帧 |
+PWM 行序按管脚图从上往下排列，均使用信号列。SWD 采用同板自回接，UART 用一根杜邦线短接 PA2 与 PA0。接插件脚号依据 [DM-MC02 V1.0 原理图](https://github.com/dmBots/DM-MC02/blob/master/drawings/2d/schematics/CtrBoard-H7_V1.0-240124.pdf)。
 
+## 实测记录
 
-### 主机端
+板卡为 DM-MC02，MCU 为 STM32H723VG，编译目标为 `thumbv7em-none-eabihf`。使用 Horco CMSIS-DAP 外置探针烧录。
 
-| 项目 | 参数 |
-|---|---|
-| 控制串口 | 实际枚举的控制 CDC 端口；另一个 CDC 用于 UART8 |
-| 串口配置 | 115200 baud；CAN 总线位率另按上表配置 |
-| 单次读取 / 写入超时 | 50 ms / 1 s |
-| 命令回复超时 | 默认 3 s，可用 `--timeout` 指定 |
-| 退出时停止流的等待 | 最多 0.5 s |
-| 待回复请求 / 键盘输入队列 | 1 个 / 16 行 |
-| 会话编号 | 每次连接随机生成的 8 位 HEX nonce，重连重新同步 |
+| 项目 | 执行命令 | 实际结果 |
+|---|---|---|
+| 编译 | `cargo build --locked` | `Finished dev profile [optimized + debuginfo]` |
+| 烧录 | `cargo run --locked` | 最近一次 Erasing、Programming 均达到 100%；Programming 为 135.00 KiB，`Finished in 11.37s` |
+| 外置探针识别 | `probe-rs list` | `Horco CMSIS-DAP -- ef1a:74e5-0:7844331832 (CMSIS-DAP)` |
+| 板上演示探针发现 | `probe-rs list` | `DM-MC02 CMSIS-DAP Demo -- c0de:cafc-0: (CMSIS-DAP)` |
+| 最后一次串口枚举 | `.\.venv\Scripts\python.exe host_bridge.py --list-ports` | `COM5: USB 串行设备 (COM5)`；`COM6: USB 串行设备 (COM6)` |
 
-## 验收接口与状态
+SWD 自测记录使用控制口 COM7，连续两次读取 DPIDR，随后执行 PING：
 
-消息使用 ASCII，以 LF 结束，接受 CRLF。以下以会话编号 `89ABCDEF` 为例，实际编号由主机工具生成。
+```text
+.\.venv\Scripts\python.exe host.py COM7 swd
+OK DPIDR 6BA02477
+.\.venv\Scripts\python.exe host.py COM7 swd
+OK DPIDR 6BA02477
+.\.venv\Scripts\python.exe host.py COM7 ping
+OK DM-MC02
+```
 
-| 请求或消息 | 回复或含义 |
-|---|---|
-| `PING` | `OK DM-MC02` |
-| `SWD ID` | `OK DPIDR <8位HEX>`，需要连接实际目标 |
-| `CAN HELLO 89ABCDEF` | `OK HELLO 89ABCDEF` |
-| `CAN STREAM 89ABCDEF ON` / `OFF` | `OK STREAM 89ABCDEF ON` / `OFF` |
-| `CAN TX 89ABCDEF 123 2 A55A` | `OK QUEUED 89ABCDEF` |
-| `CAN TX 89ABCDEF 123 0 -` | 零字节数据帧 |
-| `RX 89ABCDEF 321 2 A55A` | 主动上报：会话编号、ID、十进制长度、HEX 数据 |
+最后一次烧录并重新连接后，控制口为 COM5，UART 口为 COM6，实际结果为：
 
+```text
+.\.venv\Scripts\python.exe host.py COM5 ping
+OK DM-MC02
+.\.venv\Scripts\python.exe host.py COM6 uart-loopback
+OK UART loopback
+```
+
+## 用实测确认的配置
+
+将 PA2 与 PA0 短接后，`host.py` 发送 `HerKules UART\n`，并逐字节核对返回的 14 字节，结果为 `OK UART loopback`。这项实测确认了 USART2/PA2 发送、UART4/PA0 单线接收的组合配置和回环接线能够完成串口收发。
